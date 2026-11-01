@@ -2,217 +2,386 @@ package com.akay.umbrellacatch
 
 import android.content.Context
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.RectF
-import android.graphics.Typeface
-import android.os.Handler
-import android.os.Looper
+import android.view.MotionEvent
 import android.view.View
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.min
+import kotlin.math.sin
 import kotlin.random.Random
 
-private class Drop(var x: Float, var y: Float, val speed: Float, val color: Int, val size: Float)
-private class Pop(var x: Float, var y: Float, var life: Float, val text: String)
+private class Drop(val x: Float, var y: Float, val vy: Float, val color: Int, val phase: Float)
+private class Pop(val x: Float, var y: Float, var life: Float)
+private class Landed(val x: Float, val y: Float, val color: Int, var life: Float)
+private class Streak(var x: Float, var y: Float, val len: Float, val spd: Float)
 
-class GameView(ctx: Context) : View(ctx) {
+// Classic Mode: the whole game screen is drawn by this one view
+class GameView(ctx: Context) : View(ctx), InsetAware {
 
-    var onScore: (Int) -> Unit = {}
-    var onBest: (Int) -> Unit = {}
+    var onHome: () -> Unit = {}
 
-    private val sky = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val tp = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val path = Path()
-    private val rf = RectF()
+    private var insetTop = (24 * resources.displayMetrics.density).toInt()
+    private var insetBottom = 0
 
+    private val rnd = Random(System.nanoTime())
     private val drops = ArrayList<Drop>()
     private val pops = ArrayList<Pop>()
-    private val rnd = Random(System.currentTimeMillis())
-    private val colors = intArrayOf(
-        0xFFE23B3B.toInt(), 0xFFFFC233.toInt(), 0xFF8A4DFF.toInt(),
-        0xFF3BD15A.toInt(), 0xFF3B8CFF.toInt(), 0xFFFF4D9E.toInt()
-    )
+    private val landed = ArrayList<Landed>()
+    private val rain = ArrayList<Streak>()
 
-    private var bucketX = 0.5f
-    private var dir = 0
+    private var time = 0f
+    private var introT = 3.2f
     private var score = 0
-    private var running = false
-    private var spawnTimer = 0f
-    private var spawnGap = 1.1f
-    private var fallSpeed = 0.26f
-    private var lastT = 0L
-    private var wobble = 0f
+    private var best = Store.best()
+    private var bx = 0.5f
+    private var dirL = false
+    private var dirR = false
+    private var dragX = -1f
+    private var paused = false
+    private var spawnT = 0.8f
+    private var gap = 1.15f
+    private var speedK = 0.2f
+    private var wob = 0f
+    private var last = 0L
+    private var alive = false
+    private var pausePressed = false
 
-    private val handler = Handler(Looper.getMainLooper())
-    private val loop = object : Runnable {
-        override fun run() {
-            if (running) {
-                tick()
-                invalidate()
-                handler.postDelayed(this, 16)
-            }
+    private val pauseR = RectF()
+    private val resumeR = RectF()
+    private val homeR = RectF()
+    private var lcx = 0f
+    private var rcx = 0f
+    private var lcy = 0f
+    private var btnR = 0f
+
+    private val white = 0xFFFFFFFF.toInt()
+    private val gold = 0xFFFFC21A.toInt()
+    private val yellow = 0xFFFFD43B.toInt()
+    private val navy = 0xFF0A2A66.toInt()
+
+    init {
+        for (i in 0 until 36) {
+            rain.add(Streak(rnd.nextFloat(), rnd.nextFloat(), 0.03f + rnd.nextFloat() * 0.03f, 0.9f + rnd.nextFloat() * 0.6f))
         }
     }
 
-    init {
-        tp.typeface = Typeface.DEFAULT_BOLD
-        tp.textAlign = Paint.Align.CENTER
+    private val frame: Runnable = object : Runnable {
+        override fun run() {
+            if (!alive) return
+            val now = System.nanoTime()
+            var dt = (now - last) / 1_000_000_000f
+            last = now
+            if (dt > 0.05f) dt = 0.05f
+            update(dt)
+            invalidate()
+            postOnAnimation(this)
+        }
     }
 
-    fun start() {
-        drops.clear()
-        pops.clear()
-        score = 0
-        spawnGap = 1.1f
-        fallSpeed = 0.26f
-        onScore(0)
-        lastT = System.nanoTime()
-        running = true
-        handler.removeCallbacks(loop)
-        handler.post(loop)
+    override fun setInsets(top: Int, bottom: Int) {
+        insetTop = top
+        insetBottom = bottom
+        invalidate()
     }
 
-    fun pause() {
-        running = false
-        handler.removeCallbacks(loop)
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        alive = true
+        last = System.nanoTime()
+        postOnAnimation(frame)
     }
 
-    fun resumeGame() {
-        if (running) return
-        lastT = System.nanoTime()
-        running = true
-        handler.post(loop)
+    override fun onDetachedFromWindow() {
+        alive = false
+        removeCallbacks(frame)
+        super.onDetachedFromWindow()
     }
 
-    fun setDir(d: Int) {
-        dir = d
+    fun pauseGame() {
+        paused = true
     }
 
-    private fun tick() {
-        val now = System.nanoTime()
-        var dt = (now - lastT) / 1_000_000_000f
-        lastT = now
-        if (dt > 0.05f) dt = 0.05f
+    // the phone's back button: first it pauses the game, then it goes home
+    fun backPressed(): Boolean {
+        if (!paused) {
+            paused = true
+            return true
+        }
+        return false
+    }
+
+    private fun rimYOf(hh: Float, bw: Float): Float = hh * 0.862f - bw * 0.86f
+
+    private fun update(dt: Float) {
+        for (s in rain) {
+            s.y += s.spd * dt
+            s.x -= 0.05f * dt
+            if (s.y > 1.05f) {
+                s.y = -0.05f
+                s.x = rnd.nextFloat()
+            }
+            if (s.x < -0.05f) s.x = 1.05f
+        }
+        if (paused) return
         val w = width.toFloat()
         val h = height.toFloat()
-        if (w <= 0 || h <= 0) return
+        if (w <= 0f || h <= 0f) return
+        val hh = h - insetBottom
 
-        bucketX += dir * dt * 1.1f
-        bucketX = bucketX.coerceIn(0.1f, 0.9f)
+        time += dt
+        if (introT > 0f) introT -= dt
+        if (wob > 0f) wob = (wob - dt * 3f).coerceAtLeast(0f)
 
-        spawnTimer -= dt
-        if (spawnTimer <= 0f) {
-            spawnTimer = spawnGap * (0.75f + rnd.nextFloat() * 0.5f)
-            val size = h * 0.06f
+        val bw = w * 0.24f
+        val half = bw * 0.55f / w
+        if (dirL && !dirR) {
+            bx -= 1.2f * dt
+        } else if (dirR && !dirL) {
+            bx += 1.2f * dt
+        } else if (dragX >= 0f) {
+            bx += (dragX - bx) * min(1f, dt * 14f)
+        }
+        bx = bx.coerceIn(half, 1f - half)
+
+        spawnT -= dt
+        if (spawnT <= 0f) {
+            spawnT = gap * (0.75f + rnd.nextFloat() * 0.5f)
             drops.add(
                 Drop(
-                    0.1f + rnd.nextFloat() * 0.8f, -0.08f,
-                    fallSpeed * (0.85f + rnd.nextFloat() * 0.3f),
-                    colors[rnd.nextInt(colors.size)], size
+                    0.12f + rnd.nextFloat() * 0.76f, -w * 0.12f,
+                    speedK * hh * (0.88f + rnd.nextFloat() * 0.24f),
+                    D.UMB[rnd.nextInt(D.UMB.size)], rnd.nextFloat() * 6.28f
                 )
             )
         }
 
-        val bucketY = 0.86f
-        val bucketHalf = 0.11f
-        val it = drops.iterator()
-        while (it.hasNext()) {
-            val d = it.next()
-            d.y += d.speed * dt
-            if (d.y > bucketY - 0.03f && d.y < bucketY + 0.06f && Math.abs(d.x - bucketX) < bucketHalf) {
+        val ur = w * 0.095f
+        val rimY = rimYOf(hh, bw)
+        val iter = drops.iterator()
+        while (iter.hasNext()) {
+            val d = iter.next()
+            d.y += d.vy * dt
+            val dx = (d.x + sin(time * 2f + d.phase) * 0.012f) * w
+            if (d.y > rimY - ur * 0.15f && d.y < rimY + bw * 0.35f && abs(dx - bx * w) < bw * 0.46f) {
                 score += 10
-                onScore(score)
-                if (score > Store.best()) {
-                    Store.setBest(score)
-                    onBest(score)
+                if (score > best) {
+                    best = score
+                    Store.setBest(best)
                 }
-                pops.add(Pop(d.x, d.y, 1f, "+10"))
+                landed.add(Landed(dx, d.y, d.color, 0.28f))
+                pops.add(Pop(dx, rimY - ur, 1f))
                 Sfx.catch()
-                wobble = 1f
-                it.remove()
-                spawnGap = (spawnGap - 0.004f).coerceAtLeast(0.46f)
-                fallSpeed = (fallSpeed + 0.0025f).coerceAtMost(0.62f)
-                continue
+                wob = 1f
+                gap = (gap - 0.012f).coerceAtLeast(0.5f)
+                speedK = (speedK + 0.003f).coerceAtMost(0.5f)
+                iter.remove()
+            } else if (d.y > hh + ur * 2f) {
+                iter.remove()
             }
-            if (d.y > 1.1f) it.remove()
         }
 
-        val pit = pops.iterator()
-        while (pit.hasNext()) {
-            val pop = pit.next()
-            pop.life -= dt * 1.4f
-            pop.y -= dt * 0.12f
-            if (pop.life <= 0f) pit.remove()
+        val li = landed.iterator()
+        while (li.hasNext()) {
+            val ld = li.next()
+            ld.life -= dt
+            if (ld.life <= 0f) li.remove()
         }
-
-        if (wobble > 0f) wobble = (wobble - dt * 3f).coerceAtLeast(0f)
+        val pi = pops.iterator()
+        while (pi.hasNext()) {
+            val pp = pi.next()
+            pp.life -= dt * 1.3f
+            pp.y -= dt * h * 0.1f
+            if (pp.life <= 0f) pi.remove()
+        }
     }
 
-    private fun umbrella(c: Canvas, cx: Float, cy: Float, s: Float, col: Int) {
-        path.reset()
-        path.moveTo(cx - s, cy)
-        path.quadTo(cx, cy - s * 1.05f, cx + s, cy)
-        path.quadTo(cx + s * 0.6f, cy - s * 0.18f, cx + s * 0.3f, cy)
-        path.quadTo(cx, cy - s * 0.12f, cx - s * 0.3f, cy)
-        path.quadTo(cx - s * 0.6f, cy - s * 0.18f, cx - s, cy)
-        path.close()
-        p.style = Paint.Style.FILL
-        p.color = col
-        c.drawPath(path, p)
-        p.color = Color.WHITE
-        p.alpha = 70
-        c.drawLine(cx, cy - s * 0.9f, cx, cy, p)
-        p.alpha = 255
-        p.color = 0xFF6B4A2A.toInt()
-        p.style = Paint.Style.STROKE
-        p.strokeWidth = s * 0.1f
-        c.drawLine(cx, cy, cx, cy + s * 0.55f, p)
-        rf.set(cx, cy + s * 0.4f, cx + s * 0.3f, cy + s * 0.7f)
-        c.drawArc(rf, 90f, 180f, false, p)
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        val act = e.actionMasked
+        if (paused) {
+            if (act == MotionEvent.ACTION_UP) {
+                if (resumeR.contains(e.x, e.y)) {
+                    paused = false
+                } else if (homeR.contains(e.x, e.y)) {
+                    onHome()
+                }
+            }
+            return true
+        }
+        if (act == MotionEvent.ACTION_DOWN && pauseR.contains(e.x, e.y)) {
+            pausePressed = true
+            return true
+        }
+        if (pausePressed) {
+            if (act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL) {
+                pausePressed = false
+                if (act == MotionEvent.ACTION_UP && pauseR.contains(e.x, e.y)) paused = true
+                dirL = false
+                dirR = false
+                dragX = -1f
+            }
+            return true
+        }
+        val ending = act == MotionEvent.ACTION_UP || act == MotionEvent.ACTION_CANCEL
+        var l = false
+        var r = false
+        var drag = -1f
+        val w = width.toFloat()
+        if (!ending && w > 0f) {
+            for (i in 0 until e.pointerCount) {
+                if (act == MotionEvent.ACTION_POINTER_UP && i == e.actionIndex) continue
+                val x = e.getX(i)
+                val y = e.getY(i)
+                if (hypot(x - lcx, y - lcy) < btnR * 1.3f) {
+                    l = true
+                } else if (hypot(x - rcx, y - lcy) < btnR * 1.3f) {
+                    r = true
+                } else if (!pauseR.contains(x, y)) {
+                    drag = x / w
+                }
+            }
+        }
+        dirL = l
+        dirR = r
+        dragX = drag
+        return true
     }
 
     override fun onDraw(c: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        if (w <= 0 || h <= 0) return
+        if (w <= 0f || h <= 0f) return
+        val hh = h - insetBottom
+        val k = min(w / 941f, hh / 1672f)
+        val top = insetTop.toFloat()
+        val p = D.p
 
-        sky.shader = android.graphics.LinearGradient(0f, 0f, 0f, h, 0xFF57B6F2.toInt(), 0xFFBDEBFF.toInt(), android.graphics.Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, w, h, sky)
+        D.gameSky(c, w, h, hh, k, time)
 
-        for (d in drops) umbrella(c, d.x * w, d.y * h, d.size, d.color)
-
-        val bx = bucketX * w
-        val by = h * 0.86f
-        val bw = h * 0.1f * (1f + wobble * 0.18f)
+        p.shader = null
+        p.style = Paint.Style.STROKE
+        p.strokeCap = Paint.Cap.ROUND
+        p.strokeWidth = 3f * k
+        p.color = 0x66FFFFFF
+        for (s in rain) {
+            val sx = s.x * w
+            val sy = s.y * hh
+            c.drawLine(sx, sy, sx - s.len * hh * 0.15f, sy + s.len * hh, p)
+        }
         p.style = Paint.Style.FILL
-        p.color = 0xFFE23B3B.toInt()
-        path.reset()
-        path.moveTo(bx - bw, by)
-        path.lineTo(bx + bw, by)
-        path.lineTo(bx + bw * 0.78f, by + bw * 1.1f)
-        path.lineTo(bx - bw * 0.78f, by + bw * 1.1f)
-        path.close()
-        c.drawPath(path, p)
-        p.color = 0xFFFFD23B.toInt()
-        rf.set(bx - bw * 1.02f, by - bw * 0.22f, bx + bw * 1.02f, by + bw * 0.08f)
-        c.drawRoundRect(rf, bw * 0.12f, bw * 0.12f, p)
-        p.color = Color.WHITE
-        val starPath = Path()
-        for (i in 0 until 10) {
-            val rad = if (i % 2 == 0) bw * 0.4f else bw * 0.18f
-            val a = Math.toRadians(-90.0 + i * 36.0)
-            val px = bx + (rad * Math.cos(a)).toFloat()
-            val py = by + bw * 0.45f + (rad * Math.sin(a)).toFloat()
-            if (i == 0) starPath.moveTo(px, py) else starPath.lineTo(px, py)
-        }
-        starPath.close()
-        c.drawPath(starPath, p)
 
-        for (pop in pops) {
-            tp.color = Color.argb((pop.life * 255).toInt().coerceIn(0, 255), 255, 255, 255)
-            tp.textSize = h * 0.035f
-            c.drawText(pop.text, pop.x * w, pop.y * h, tp)
+        D.gameGround(c, w, h, hh, k)
+
+        val ur = w * 0.095f
+        for (d in drops) {
+            val dx = (d.x + sin(time * 2f + d.phase) * 0.012f) * w
+            D.umbrella(c, dx, d.y, ur, d.color)
         }
+
+        // bucket
+        val bw = w * 0.24f
+        val bh = bw * 0.86f
+        val rimY = rimYOf(hh, bw)
+        val bxp = bx * w
+        c.save()
+        c.scale(1f + wob * 0.08f, 1f - wob * 0.06f, bxp, rimY + bh)
+        D.bucketBack(c, bxp, rimY, bw)
+        for (ld in landed) {
+            val pr = 1f - ld.life / 0.28f
+            val px = ld.x + (bxp - ld.x) * pr
+            val py = ld.y + (rimY + bh * 0.35f - ld.y) * pr
+            val sc = 1f - 0.5f * pr
+            c.save()
+            c.translate(px, py)
+            c.scale(sc, sc)
+            D.umbrella(c, 0f, 0f, ur, ld.color)
+            c.restore()
+        }
+        D.bucketFront(c, bxp, rimY, bw, bh)
+        c.restore()
+
+        for (pp in pops) {
+            val a = (pp.life.coerceIn(0f, 1f) * 255f).toInt()
+            D.text(c, "+10", pp.x, pp.y, 44f * k, D.withA(yellow, a), Paint.Align.CENTER, D.withA(navy, a), 6f * k)
+        }
+
+        // the big round buttons
+        btnR = 88f * k
+        lcx = w * 0.135f
+        rcx = w * 0.865f
+        lcy = hh * 0.915f
+        D.arrowBtn(c, lcx, lcy, btnR, true, dirL, k)
+        D.arrowBtn(c, rcx, lcy, btnR, false, dirR, k)
+
+        if (introT > 0f) drawIntro(c, w, hh, k)
+        drawHud(c, w, top, k)
+        if (paused) drawPause(c, w, h, hh, k)
+    }
+
+    private fun drawIntro(c: Canvas, w: Float, hh: Float, k: Float) {
+        val a = (min(1f, introT / 0.8f) * 255f).toInt()
+        val cy = hh * 0.47f
+        val cx = w / 2f
+        D.text(c, "Catch", cx, cy - 40f * k, 100f * k, D.withA(white, a), Paint.Align.CENTER, D.withA(0xFF1F5FBF.toInt(), a), 14f * k)
+        val s2 = min(120f * k, D.fit("Umbrellas!", 560f * k))
+        D.text(c, "Umbrellas!", cx, cy + 70f * k, s2, D.withA(0xFFFFD42A.toInt(), a), Paint.Align.CENTER, D.withA(0xFF2A2A6A.toInt(), a), 14f * k)
+        D.fillRR(c, cx - 300f * k, cy + 105f * k, cx + 300f * k, cy + 190f * k, 42f * k, D.withA(0xFF7A1E6E.toInt(), (a * 0.9f).toInt()))
+        val s3 = min(38f * k, D.fit("Score high & beat your Best!", 520f * k))
+        D.text(c, "Score high & beat your Best!", cx, cy + 160f * k, s3, D.withA(white, a))
+    }
+
+    private fun drawHud(c: Canvas, w: Float, top: Float, k: Float) {
+        val hy = top + 58f * k
+        val hf = 42f * k
+
+        val l1 = w * 0.027f
+        val r1 = w * 0.308f
+        D.hudPill(c, l1, hy - hf, r1, hy + hf, k)
+        D.icon(c, K.TROPHY, l1 + 46f * k, hy, 58f * k, gold)
+        D.text(c, "Score", l1 + 92f * k, hy - 6f * k, 26f * k, white, Paint.Align.LEFT)
+        D.text(c, score.toString(), l1 + 92f * k, hy + 32f * k, 42f * k, yellow, Paint.Align.LEFT, navy, 5f * k)
+
+        val l2 = w * 0.35f
+        val r2 = w * 0.632f
+        D.hudPill(c, l2, hy - hf, r2, hy + hf, k)
+        D.icon(c, K.CROWN, l2 + 46f * k, hy, 58f * k, gold)
+        D.text(c, "Best", l2 + 92f * k, hy - 6f * k, 26f * k, white, Paint.Align.LEFT)
+        D.text(c, best.toString(), l2 + 92f * k, hy + 32f * k, 42f * k, yellow, Paint.Align.LEFT, navy, 5f * k)
+
+        val pcx = w * 0.933f
+        val pr = 46f * k
+        D.hudCircle(c, pcx, hy, pr, k)
+        D.icon(c, K.PAUSE, pcx, hy, 40f * k, white)
+        pauseR.set(pcx - pr - 14f * k, hy - pr - 14f * k, pcx + pr + 14f * k, hy + pr + 14f * k)
+    }
+
+    private fun drawPause(c: Canvas, w: Float, h: Float, hh: Float, k: Float) {
+        D.p.shader = null
+        D.p.style = Paint.Style.FILL
+        D.p.color = 0xAA0A1B3D.toInt()
+        c.drawRect(0f, 0f, w, h, D.p)
+
+        val pl = w * 0.14f
+        val pr = w * 0.86f
+        val pt = hh * 0.3f
+        val pb = pt + 520f * k
+        D.fillRR(c, pl - 6f * k, pt - 6f * k, pr + 6f * k, pb + 6f * k, 46f * k, white)
+        D.gradRR(c, pl, pt, pr, pb, 42f * k, 0xFF3F9BFF.toInt(), 0xFF1450C8.toInt())
+        D.text(c, "Paused", w / 2f, pt + 125f * k, 84f * k, white, Paint.Align.CENTER, 0xFF0D2F7A.toInt(), 10f * k)
+
+        val bl = pl + 60f * k
+        val br = pr - 60f * k
+        val ry = pt + 230f * k
+        D.gloss(c, bl, ry - 55f * k, br, ry + 55f * k, 0xFF55E36F.toInt(), 0xFF1D9F39.toInt(), 0xFFFFD84D.toInt(), 0x66105A22, k)
+        D.icon(c, K.PLAY, bl + 70f * k, ry, 56f * k, white)
+        D.text(c, "Resume", w / 2f + 30f * k, ry + 18f * k, 52f * k, white, Paint.Align.CENTER, 0xFF0F6B22.toInt(), 7f * k)
+        resumeR.set(bl, ry - 55f * k, br, ry + 55f * k)
+
+        val hy = pt + 400f * k
+        D.gloss(c, bl, hy - 55f * k, br, hy + 55f * k, 0xFFB56DFF.toInt(), 0xFF6C2BD8.toInt(), 0xFFD9B8FF.toInt(), 0x66331166, k)
+        D.icon(c, K.HOME, bl + 70f * k, hy, 56f * k, white)
+        D.text(c, "Home", w / 2f + 30f * k, hy + 18f * k, 52f * k, white, Paint.Align.CENTER, 0xFF3A1280.toInt(), 7f * k)
+        homeR.set(bl, hy - 55f * k, br, hy + 55f * k)
     }
 }

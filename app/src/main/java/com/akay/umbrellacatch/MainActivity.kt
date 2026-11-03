@@ -26,6 +26,7 @@ class MainActivity : ComponentActivity() {
     internal var screen = "home"
 
     private var game: GameView? = null
+    private var level: LevelView? = null
 
     // ---------- helpers (also used by MoreUi.kt) ----------
 
@@ -99,11 +100,17 @@ class MainActivity : ComponentActivity() {
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (screen == "classic") {
-                    val g = game
-                    if (g == null || !g.backPressed()) exitToHome()
-                } else {
-                    finish()
+                when (screen) {
+                    "classic" -> {
+                        val g = game
+                        if (g == null || !g.backPressed()) exitToHome()
+                    }
+                    "level" -> {
+                        val l = level
+                        if (l == null || !l.backPressed()) showMap()
+                    }
+                    "map" -> showHome()
+                    else -> finish()
                 }
             }
         })
@@ -113,6 +120,7 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         game?.pauseGame()
+        level?.pauseGame()
     }
 
     // ---------- home ----------
@@ -120,6 +128,7 @@ class MainActivity : ComponentActivity() {
     private fun showHome() {
         screen = "home"
         game = null
+        level = null
         val hv = HomeView(this)
         hv.onAction = { id -> onHomeAction(id) }
         setFull(hv)
@@ -135,7 +144,7 @@ class MainActivity : ComponentActivity() {
             }
             4 -> toast("More settings coming soon")
             5 -> showClassic()
-            6 -> toast("Coming in Stage 2")
+            6 -> showMap()
             7 -> showMoreApps()
             8 -> toast("Coming in Stage 4")
             9 -> toast("Coming in Stage 5")
@@ -179,6 +188,7 @@ class MainActivity : ComponentActivity() {
 
     private fun showClassic() {
         screen = "classic"
+        level = null
         val gv = GameView(this)
         gv.onHome = { exitToHome() }
         game = gv
@@ -188,5 +198,37 @@ class MainActivity : ComponentActivity() {
     private fun exitToHome() {
         game?.pauseGame()
         showHome()
+    }
+
+    // ---------- stage mode (levels) ----------
+
+    private fun showMap() {
+        screen = "map"
+        game = null
+        level = null
+        val mv = MapView(this)
+        mv.onBack = { showHome() }
+        mv.onPlay = { l, s -> startLevel(l, s) }
+        mv.onToast = { m -> toast(m) }
+        setFull(mv)
+    }
+
+    private fun startLevel(l: Int, s: Int) {
+        screen = "level"
+        game = null
+        val lv = LevelView(this, Levels.spec(l, s))
+        lv.onNext = {
+            val n = Levels.next(l, s)
+            if (n == null) {
+                toast("More levels coming soon!")
+                showMap()
+            } else {
+                startLevel(n[0], n[1])
+            }
+        }
+        lv.onRetry = { startLevel(l, s) }
+        lv.onMap = { showMap() }
+        level = lv
+        setFull(lv)
     }
 }

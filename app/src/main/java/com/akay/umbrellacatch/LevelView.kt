@@ -2,60 +2,87 @@ package com.akay.umbrellacatch
 
 import android.content.Context
 import android.graphics.Canvas
-import android.graphics.LinearGradient
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.RectF
-import android.graphics.Shader
 import android.view.MotionEvent
 import android.view.View
-import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.random.Random
 
-private class LDrop(
-    val x: Float, var y: Float, val vy: Float, val color: Int,
-    val phase: Float, val stone: Boolean, val special: Boolean
-)
+internal const val K_UMB = 0
+internal const val K_STONE = 1
+internal const val K_BONUS = 2
+internal const val K_MAGNET = 3
+internal const val K_REPEL = 4
+internal const val K_BIG = 5
+internal const val K_FREEZE = 6
+internal const val K_GOLD = 7
+internal const val K_MULT = 8
+internal const val K_ELASTIC = 9
 
-private class LPop(val x: Float, var y: Float, var life: Float, val text: String, val color: Int)
-private class LLanded(val x: Float, val y: Float, val color: Int, var life: Float)
-private class LStreak(var x: Float, var y: Float, val len: Float, val spd: Float)
+internal object LC {
+    val white = 0xFFFFFFFF.toInt()
+    val gold = 0xFFFFC21A.toInt()
+    val yellow = 0xFFFFD43B.toInt()
+    val navy = 0xFF0A2A66.toInt()
+    val green = 0xFF6BFF8A.toInt()
+    val red = 0xFFFF6B6B.toInt()
+}
+
+internal class LDrop(var x: Float, var y: Float, val vy: Float, val color: Int, val phase: Float, val kind: Int) {
+    var vx = 0f
+    var tp = false
+    var bt = 0f
+    var bounced = false
+    var hue = 0
+}
+
+internal class LPop(val x: Float, var y: Float, var life: Float, val text: String, val color: Int)
+internal class LLanded(val x: Float, val y: Float, val color: Int, var life: Float, val bi: Int)
+internal class LStreak(var x: Float, var y: Float, val len: Float, val spd: Float)
 
 // one level (or one stage of a level). The whole screen is drawn by this one view.
-class LevelView(ctx: Context, private val spec: Spec) : View(ctx), InsetAware {
+class LevelView(ctx: Context, internal val spec: Spec) : View(ctx), InsetAware {
 
     var onNext: () -> Unit = {}
     var onRetry: () -> Unit = {}
     var onMap: () -> Unit = {}
 
-    private var insetTop = (24 * resources.displayMetrics.density).toInt()
-    private var insetBottom = 0
+    internal var insetTop = (24 * resources.displayMetrics.density).toInt()
+    internal var insetBottom = 0
 
     private val rnd = Random(System.nanoTime())
     private val drops = ArrayList<LDrop>()
     private val pops = ArrayList<LPop>()
     private val landed = ArrayList<LLanded>()
     private val rain = ArrayList<LStreak>()
-    private val clip = Path()
+    private val fireworks = Fireworks()
+    private val theme = Fx.theme(spec.level)
 
-    private val demo = spec.special >= 0
-    private var animT = 0f
+    internal val COL3 = intArrayOf(D.UMB[0], D.UMB[4], D.UMB[1])
+    internal val colorNames = arrayOf("Red", "Blue", "Yellow")
+    private val goldPts = if (spec.level == 30) 30 else 20
+
+    // levels 16+ and stage B (7-15) wait for the Start button
+    internal val needStart = spec.special >= 0 || spec.level >= 16
+    internal var animT = 0f
     private var playT = 0f
-    private var phase = 0
-    private var introT = 2.8f
-    private var paused = false
-    private var won = false
-    private var reason = ""
-    private var score = 0
-    private var best = Store.stageBest(spec.level, spec.stage)
-    private var hearts = spec.hearts
-    private var timeLeft = spec.time
+    internal var phase = 0
+    internal var introT = 2.8f
+    internal var paused = false
+    internal var won = false
+    internal var reason = ""
+    internal var score = 0
+    internal var best = Store.stageBest(spec.level, spec.stage)
+    internal var hearts = spec.hearts
+    internal var timeLeft = spec.time
+
     private var bx = 0.5f
+    private var bv = 0f
     private var dirL = false
     private var dirR = false
     private var dragX = -1f
@@ -67,23 +94,44 @@ class LevelView(ctx: Context, private val spec: Spec) : View(ctx), InsetAware {
     private var alive = false
     private var pausePressed = false
 
-    private val pauseR = RectF()
-    private val startR = RectF()
-    private val resumeR = RectF()
-    private val homeR = RectF()
-    private val resR = Array(3) { RectF() }
-    private val resAct = IntArray(3)
-    private var resCount = 0
+    // effects
+    internal var freezeT = 0f
+    internal var multT = 0f
+    internal var wideT = 0f
+    internal var g = 1
+    private var gravT = 8f
+    private var gravWarn = false
+    internal var windDir = if (spec.level % 2 == 0) 1 else -1
+    private var windT = 5f
+    internal var bcol = 0
+    private var colT = 10f
+    private var lightT = 5f
+    private var lightning = 0f
+    private var portalT = 10f
+    private var portalPop = 1f
+    private var pxL = 0f
+    private var pxR = 0f
+    private var spawnCount = 0
+    private var surgeT = 0f
+    internal var surgeState = 0
+    internal var bossPhase = 1
+    internal var banner = ""
+    internal var bannerT = 0f
+
+    private val bxs = FloatArray(2)
+    private var nb = 1
+
+    internal val pauseR = RectF()
+    internal val startR = RectF()
+    internal val resumeR = RectF()
+    internal val homeR = RectF()
+    internal val resR = Array(3) { RectF() }
+    internal val resAct = IntArray(3)
+    internal var resCount = 0
     private var lcx = 0f
     private var rcx = 0f
     private var lcy = 0f
     private var btnR = 0f
-
-    private val white = 0xFFFFFFFF.toInt()
-    private val gold = 0xFFFFC21A.toInt()
-    private val yellow = 0xFFFFD43B.toInt()
-    private val navy = 0xFF0A2A66.toInt()
-    private val green = 0xFF6BFF8A.toInt()
 
     init {
         for (i in 0 until 36) {
@@ -136,9 +184,66 @@ class LevelView(ctx: Context, private val spec: Spec) : View(ctx), InsetAware {
         return false
     }
 
+    // ---------- helpers ----------
+
+    internal fun windMode(): Int = if (spec.wind != 0) spec.wind else if (spec.boss && bossPhase == 2) 1 else 0
+
+    internal fun stonesOn(): Boolean = spec.stones || (spec.boss && bossPhase == 2)
+
+    private fun shrinkOn(): Boolean = spec.shrink || (spec.boss && bossPhase == 2)
+
+    private fun speedMulNow(): Float = if (spec.boss && bossPhase == 1) 1.3f else spec.speedMul
+
+    private fun kOf(w: Float, hh: Float): Float = min(w / 941f, hh / 1672f)
+
+    private fun fade(color: Int): Int = D.mix(color, LC.white, 0.6f)
+
+    private fun say(t: String) {
+        banner = t
+        bannerT = 1.6f
+    }
+
+    private fun bwNow(w: Float): Float {
+        var f = 1f
+        if (shrinkOn()) f *= max(0.5f, 1f - 0.5f * score / spec.target.toFloat())
+        if (wideT > 0f) f *= 1.5f
+        return (if (spec.dual != 0) w * 0.17f else w * 0.24f) * f
+    }
+
     private fun rimYOf(hh: Float, bw: Float): Float = hh * 0.862f - bw * 0.86f
 
-    private fun fade(color: Int): Int = D.mix(color, white, 0.6f)
+    private fun rimNow(hh: Float, bw: Float, k: Float): Float =
+        if (g == 1) rimYOf(hh, bw) else insetTop + 258f * k + bw * 0.86f + 8f * k
+
+    private fun centers(w: Float) {
+        when (spec.dual) {
+            0 -> {
+                nb = 1
+                bxs[0] = bx * w
+            }
+            1 -> {
+                nb = 2
+                bxs[0] = w * (0.13f + bx * 0.34f)
+                bxs[1] = w * (0.53f + bx * 0.34f)
+            }
+            else -> {
+                nb = 2
+                bxs[0] = w * (0.13f + bx * 0.34f)
+                bxs[1] = w * (0.87f - bx * 0.34f)
+            }
+        }
+    }
+
+    private fun nearestBucket(x: Float): Float {
+        var best = bxs[0]
+        for (i in 1 until nb) if (abs(x - bxs[i]) < abs(x - best)) best = bxs[i]
+        return best
+    }
+
+    private fun placePortals(w: Float) {
+        pxL = w * (0.15f + 0.3f * rnd.nextFloat())
+        pxR = w * (0.55f + 0.3f * rnd.nextFloat())
+    }
 
     // ---------- game logic ----------
 
@@ -153,21 +258,26 @@ class LevelView(ctx: Context, private val spec: Spec) : View(ctx), InsetAware {
             }
             if (s.x < -0.05f) s.x = 1.05f
         }
-        if (flash > 0f) flash = (flash - dt * 2f).coerceAtLeast(0f)
+        if (flash > 0f) flash = max(0f, flash - dt * 2f)
+        if (bannerT > 0f) bannerT -= dt
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
+        val hh = h - insetBottom
+        val k = kOf(w, hh)
+        if (spec.victory) fireworks.update(dt, w, hh)
+        if (spec.portals != 0 && pxL == 0f) placePortals(w)
+
         if (phase == 0) {
-            if (!demo) {
+            if (!needStart) {
                 introT -= dt
                 if (introT <= 0f) phase = 1
             }
             return
         }
         if (paused) return
-        val hh = h - insetBottom
 
-        if (wob > 0f) wob = (wob - dt * 3f).coerceAtLeast(0f)
+        if (wob > 0f) wob = max(0f, wob - dt * 3f)
         val li = landed.iterator()
         while (li.hasNext()) {
             val ld = li.next()
@@ -193,100 +303,356 @@ class LevelView(ctx: Context, private val spec: Spec) : View(ctx), InsetAware {
             }
         }
 
-        val bw = w * 0.24f
-        val half = bw * 0.55f / w
-        if (dirL && !dirR) {
-            bx -= 1.2f * dt
-        } else if (dirR && !dirL) {
-            bx += 1.2f * dt
-        } else if (dragX >= 0f) {
-            bx += (dragX - bx) * min(1f, dt * 14f)
-        }
-        bx = bx.coerceIn(half, 1f - half)
+        // timers of the effects
+        if (freezeT > 0f) freezeT = max(0f, freezeT - dt)
+        if (multT > 0f) multT = max(0f, multT - dt)
+        if (wideT > 0f) wideT = max(0f, wideT - dt)
+        val slow = if (freezeT > 0f) 0.35f else 1f
 
-        spawnT -= dt
-        if (spawnT <= 0f) {
-            spawnT = spec.gap * (0.75f + rnd.nextFloat() * 0.5f)
-            spawnUmbrella(w, hh)
+        if (windMode() == 2) {
+            windT -= dt
+            if (windT <= 0f) {
+                windT = 5f
+                windDir = -windDir
+                say(if (windDir > 0) "Wind: RIGHT" else "Wind: LEFT")
+            }
         }
-        if (spec.stones) {
-            stoneT -= dt
-            if (stoneT <= 0f) {
-                stoneT = spec.stoneGap * (0.75f + rnd.nextFloat() * 0.5f)
-                drops.add(
-                    LDrop(
-                        0.12f + rnd.nextFloat() * 0.76f, -w * 0.12f,
-                        spec.speed * hh * 0.78f * (0.92f + rnd.nextFloat() * 0.16f),
-                        0, rnd.nextFloat() * 6.28f, true, false
-                    )
-                )
+        if (spec.color != 0) {
+            colT -= dt
+            if (colT <= 0f) {
+                colT = 10f
+                bcol = (bcol + 1) % 3
+                say("Match: " + colorNames[bcol])
+            }
+        }
+        if (spec.fog == 2) {
+            lightT -= dt
+            if (lightT <= 0f) {
+                lightT = 6f
+                lightning = 1.2f
+            }
+            if (lightning > 0f) lightning = max(0f, lightning - dt)
+        }
+        if (spec.portals == 2) {
+            portalT -= dt
+            if (portalT <= 0f) {
+                portalT = 10f
+                placePortals(w)
+                portalPop = 0f
+                say("Portals moved!")
+            }
+        }
+        if (portalPop < 1f) portalPop = min(1f, portalPop + dt * 2.5f)
+        if (spec.gravity == 1 || spec.gravity == 2) {
+            gravT -= dt
+            if (!gravWarn && gravT <= 1f) {
+                gravWarn = true
+                say("Gravity flip!")
+            }
+            if (gravT <= 0f) {
+                g = -g
+                gravWarn = false
+                gravT = if (spec.gravity == 2) 5f else (if (g == -1) 4f else 8f)
+                wob = 1f
+            }
+        }
+        if (spec.surge) {
+            surgeT += dt
+            val cyc = surgeT % 15f
+            val ns = if (cyc < 6f) 0 else if (cyc < 10f) 1 else 2
+            if (ns != surgeState) {
+                surgeState = ns
+                if (ns == 1) say("WAVE!") else if (ns == 2) say("Break")
             }
         }
 
+        // the bucket
+        val bw = bwNow(w)
+        val half = bw * 0.55f / w
+        val lo = if (spec.dual != 0) 0f else half
+        val hi = if (spec.dual != 0) 1f else 1f - half
+        if (spec.slip) {
+            val target = if (dirL && !dirR) -1f else if (dirR && !dirL) 1f else 0f
+            val want = if (target != 0f) target * 1.2f else if (dragX >= 0f) ((dragX - bx) * 4f).coerceIn(-1.4f, 1.4f) else 0f
+            bv += (want - bv) * min(1f, dt * 2f)
+            bx += bv * dt
+            if (bx < lo) {
+                bx = lo
+                bv = 0f
+            }
+            if (bx > hi) {
+                bx = hi
+                bv = 0f
+            }
+        } else {
+            if (dirL && !dirR) {
+                bx -= 1.2f * dt
+            } else if (dirR && !dirL) {
+                bx += 1.2f * dt
+            } else if (dragX >= 0f) {
+                bx += (dragX - bx) * min(1f, dt * 14f)
+            }
+            bx = bx.coerceIn(lo, hi)
+        }
+        centers(w)
         val ur = w * 0.095f
-        val rimY = rimYOf(hh, bw)
+        val rim = rimNow(hh, bw, k)
+
+        // new umbrellas and stones
+        val sg = if (spec.surge) surgeState else 0
+        if (sg != 2) {
+            spawnT -= dt * slow * (if (sg == 1) 3.3f else 1f)
+            if (spawnT <= 0f) {
+                spawnT = spec.gap * (0.75f + rnd.nextFloat() * 0.5f)
+                spawnUmbrella(w, hh, ur)
+            }
+        }
+        if (stonesOn()) {
+            stoneT -= dt * slow
+            if (stoneT <= 0f) {
+                stoneT = spec.stoneGap * (0.75f + rnd.nextFloat() * 0.5f)
+                spawnStone(w, hh, ur)
+            }
+        }
+
+        // moving everything
+        val bandTop = hh * 0.30f
+        val bandBot = hh * 0.55f
+        val wm = windMode()
+        val pr = w * 0.075f
+        val portalY = insetTop + 330f * k
         val iter = drops.iterator()
         while (iter.hasNext()) {
             val d = iter.next()
-            d.y += d.vy * dt
-            val dx = (d.x + sin(playT * 2f + d.phase) * 0.012f) * w
-            if (d.y > rimY - ur * 0.15f && d.y < rimY + bw * 0.35f && abs(dx - bx * w) < bw * 0.46f) {
-                iter.remove()
-                if (d.stone) hitStone(dx, rimY, ur) else catchUmbrella(d, dx, rimY, ur)
-                if (phase == 2) return
-            } else if (d.y > hh + ur * 2f) {
-                iter.remove()
+            val dirD = if (d.kind == K_STONE && spec.gravity == 3) -g else g
+            var sgn = 1f
+            if (d.bt > 0f) {
+                d.bt -= dt
+                sgn = -0.9f
             }
+            d.y += dirD * d.vy * slow * sgn * dt
+            d.x += d.vx * dt
+            d.vx *= (1f - min(1f, 1.8f * dt))
+            if (wm != 0 && d.y > bandTop && d.y < bandBot) d.x += windDir * w * 0.17f * dt
+
+            val relm = (d.y - rim) * g
+            if (d.kind == K_MAGNET || (d.kind == K_STONE && spec.magnetStones)) {
+                if (relm > -hh * 0.24f && relm < 0f) {
+                    val tgt = nearestBucket(d.x)
+                    if (abs(d.x - tgt) < w * 0.34f) {
+                        d.x += (tgt - d.x) * min(1f, dt * (if (d.kind == K_STONE) 2.2f else 4f))
+                    }
+                }
+            }
+            if (d.kind == K_REPEL) {
+                if (relm > -hh * 0.22f && relm < bw * 0.5f) {
+                    val tgt = nearestBucket(d.x)
+                    if (abs(d.x - tgt) < w * 0.24f) {
+                        d.x += (if (d.x >= tgt) 1f else -1f) * w * 0.9f * dt
+                    }
+                }
+            }
+            if (spec.portals != 0 && !d.tp && abs(d.y - portalY) < ur * 0.6f) {
+                if (abs(d.x - pxL) < pr) {
+                    d.x = pxR
+                    d.tp = true
+                } else if (abs(d.x - pxR) < pr) {
+                    d.x = pxL
+                    d.tp = true
+                }
+            }
+            if (spec.bounce == 2 && d.bt > 0f) {
+                for (o in drops) {
+                    if (o === d || o.kind == K_STONE || o.bt > 0f) continue
+                    if (hypot(o.x - d.x, o.y - d.y) < ur * 1.5f) {
+                        o.vx = (if (o.x >= d.x) 1f else -1f) * w * 0.55f
+                    }
+                }
+            }
+
+            val dx = d.x + sin(playT * 2f + d.phase) * 0.012f * w
+            val rel = (d.y - rim) * g
+            if (d.bt <= 0f && rel > -ur * 0.15f && rel < bw * 0.35f) {
+                var bi = -1
+                for (i in 0 until nb) {
+                    if (abs(dx - bxs[i]) < bw * 0.46f) {
+                        bi = i
+                        break
+                    }
+                }
+                if (bi >= 0) {
+                    if (d.kind == K_ELASTIC && !d.bounced && abs(dx - bxs[bi]) > bw * 0.27f) {
+                        d.bounced = true
+                        d.bt = 0.55f
+                        d.vx = (if (dx >= bxs[bi]) 1f else -1f) * w * 0.35f
+                    } else {
+                        iter.remove()
+                        if (d.kind == K_STONE) {
+                            hitStone(d, dx, rim, ur)
+                        } else {
+                            catchDrop(d, dx, bi, rim, ur)
+                        }
+                        if (phase == 2) return
+                        continue
+                    }
+                }
+            }
+            if (d.y > hh + ur * 4f || d.y < -ur * 4f) iter.remove()
         }
     }
 
-    private fun spawnUmbrella(w: Float, hh: Float) {
+    private fun spawnUmbrella(w: Float, hh: Float, ur: Float) {
+        spawnCount++
+        var kind = K_UMB
+        var col = D.UMB[rnd.nextInt(D.UMB.size)]
         val sp = spec.special
-        val isSp = sp >= 0 && rnd.nextFloat() < 0.3f
-        var ci = rnd.nextInt(D.UMB.size)
-        if (sp >= 0) {
-            if (isSp) {
-                ci = sp
+        val r = rnd.nextFloat()
+        if (spec.gold >= 1) {
+            kind = K_GOLD
+            col = 0xFFFFC21A.toInt()
+            if (spec.gold == 2 && r < 0.3f) {
+                kind = K_BONUS
+                col = D.UMB[4]
+            }
+        } else if (sp >= 0) {
+            if (r < 0.3f) {
+                kind = K_BONUS
+                col = D.UMB[sp]
             } else {
-                ci = rnd.nextInt(D.UMB.size - 1)
+                var ci = rnd.nextInt(D.UMB.size - 1)
                 if (ci >= sp) ci++
+                col = D.UMB[ci]
+            }
+        } else {
+            if (spec.color != 0) col = COL3[rnd.nextInt(3)]
+            if (spec.freeze && r < 0.12f) {
+                kind = K_FREEZE
+                col = 0xFF7FD8FF.toInt()
+            } else if (spec.magnet && r < 0.22f) {
+                kind = K_MAGNET
+                col = 0xFFFF4DA6.toInt()
+            } else if (spec.repel && r < 0.32f) {
+                kind = K_REPEL
+                col = 0xFF5B6275.toInt()
+            } else if (spec.big && r < 0.22f) {
+                kind = K_BIG
+            } else if (spec.bounce != 0 && r < 0.45f) {
+                kind = K_ELASTIC
+            } else if (spec.mult && spawnCount % 4 == 0) {
+                kind = K_MULT
+                col = 0xFFB26DFF.toInt()
             }
         }
-        drops.add(
-            LDrop(
-                0.12f + rnd.nextFloat() * 0.76f, -w * 0.12f,
-                spec.speed * hh * (0.88f + rnd.nextFloat() * 0.24f),
-                D.UMB[ci], rnd.nextFloat() * 6.28f, false, isSp
-            )
-        )
+        var x = w * (0.12f + rnd.nextFloat() * 0.76f)
+        if (spec.portals != 0 && rnd.nextFloat() < 0.6f) {
+            x = (if (rnd.nextBoolean()) pxL else pxR) + (rnd.nextFloat() - 0.5f) * w * 0.07f
+        }
+        val vy = spec.speed * speedMulNow() * hh * (0.88f + rnd.nextFloat() * 0.24f)
+        val y = if (g == 1) -ur * 1.5f else hh + ur * 1.5f
+        drops.add(LDrop(x, y, vy, col, rnd.nextFloat() * 6.28f, kind))
     }
 
-    private fun catchUmbrella(d: LDrop, dx: Float, rimY: Float, ur: Float) {
-        score += 10
+    private fun spawnStone(w: Float, hh: Float, ur: Float) {
+        var x = w * (0.12f + rnd.nextFloat() * 0.76f)
+        if (spec.portals != 0 && rnd.nextFloat() < 0.6f) {
+            x = (if (rnd.nextBoolean()) pxL else pxR) + (rnd.nextFloat() - 0.5f) * w * 0.07f
+        }
+        val up = spec.gravity == 3
+        if (up) {
+            var tries = 0
+            while (tries < 6) {
+                var near = false
+                for (i in 0 until nb) if (abs(x - bxs[i]) < w * 0.2f) near = true
+                if (!near) break
+                x = w * (0.1f + 0.8f * rnd.nextFloat())
+                tries++
+            }
+        }
+        val dirD = if (up) -g else g
+        val y = if (dirD == 1) -ur * 1.5f else hh + ur * 1.5f
+        val vy = spec.speed * speedMulNow() * hh * 0.78f * (0.92f + rnd.nextFloat() * 0.16f)
+        val d = LDrop(x, y, vy, 0, rnd.nextFloat() * 6.28f, K_STONE)
+        d.hue = rnd.nextInt(3)
+        drops.add(d)
+    }
+
+    private fun catchDrop(d: LDrop, dx: Float, bi: Int, rim: Float, ur: Float) {
+        var pts = 10
+        when (d.kind) {
+            K_MAGNET -> pts = 30
+            K_GOLD -> pts = goldPts
+            K_REPEL -> pts = -10
+        }
+        if (spec.color != 0 && (d.kind == K_UMB || d.kind == K_ELASTIC)) {
+            val match = d.color == COL3[bcol]
+            if (spec.color == 2) {
+                if (!match) pts = 0
+            } else if (match) {
+                pts = 20
+            }
+        }
+        if (pts > 0 && multT > 0f) pts *= 2
+        score = max(0, score + pts)
         if (score > best) {
             best = score
             Store.setStageBest(spec.level, spec.stage, best)
         }
-        val col = if (spec.special >= 0 && !d.special) fade(d.color) else d.color
-        landed.add(LLanded(dx, d.y, col, 0.28f))
-        pops.add(LPop(dx, rimY - ur, 1f, "+10", yellow))
-        Sfx.catch()
+        val gy = if (g == 1) d.y else 2f * rim - d.y
+        val col = if (spec.special >= 0 && d.kind == K_UMB) fade(d.color) else d.color
+        landed.add(LLanded(dx, gy, col, 0.28f, bi))
+        val py = rim - g * ur
+        val txt = if (pts > 0) "+$pts" else if (pts < 0) "$pts" else "x"
+        pops.add(LPop(dx, py, 1f, txt, if (pts < 0) LC.red else LC.yellow))
+        if (pts < 0) Sfx.hit() else Sfx.catch()
         wob = 1f
-        if (d.special) {
-            timeLeft = min(Levels.MAX_TIME, timeLeft + Levels.BONUS_TIME)
-            pops.add(LPop(dx, rimY - ur * 2.4f, 1.3f, "+3s", green))
-            Sfx.bonus()
+        when (d.kind) {
+            K_BONUS -> {
+                timeLeft = min(Levels.MAX_TIME, timeLeft + Levels.BONUS_TIME)
+                pops.add(LPop(dx, py - ur * 1.4f, 1.3f, "+3s", LC.green))
+                Sfx.bonus()
+            }
+            K_BIG -> {
+                wideT = 7f
+                pops.add(LPop(dx, py - ur * 1.4f, 1.3f, "WIDE!", LC.green))
+                Sfx.bonus()
+            }
+            K_FREEZE -> {
+                freezeT = 5f
+                pops.add(LPop(dx, py - ur * 1.4f, 1.3f, "FREEZE!", 0xFF8FE3FF.toInt()))
+                Sfx.bonus()
+            }
+            K_MULT -> {
+                multT = 8f
+                pops.add(LPop(dx, py - ur * 1.4f, 1.3f, "x2!", 0xFFD9A8FF.toInt()))
+                Sfx.bonus()
+            }
+            K_MAGNET -> Sfx.bonus()
+        }
+        if (spec.boss && bossPhase == 1 && score >= spec.target / 2) {
+            bossPhase = 2
+            say("Phase 2!")
         }
         if (score >= spec.target) finish(true, "")
     }
 
-    private fun hitStone(dx: Float, rimY: Float, ur: Float) {
-        hearts -= 1
-        timeLeft -= Levels.STONE_TIME
+    private fun hitStone(d: LDrop, dx: Float, rim: Float, ur: Float) {
+        var hp = 1
+        var tm = Levels.STONE_TIME
+        if (spec.color == 3 && d.hue != bcol) {
+            hp = 2
+            tm = 10f
+        }
         flash = 1f
         wob = 1f
-        pops.add(LPop(dx, rimY - ur, 1.3f, "-5s", 0xFFFF6B6B.toInt()))
+        pops.add(LPop(dx, rim - g * ur, 1.3f, "-" + tm.toInt() + "s", LC.red))
         Sfx.hit()
+        if (spec.heartSaver) {
+            hearts = 0
+            finish(false, "A stone hit!")
+            return
+        }
+        hearts -= hp
+        timeLeft -= tm
         if (hearts <= 0) {
             hearts = 0
             finish(false, "No hearts left!")
@@ -317,7 +683,7 @@ class LevelView(ctx: Context, private val spec: Spec) : View(ctx), InsetAware {
         val act = e.actionMasked
         if (phase == 0) {
             if (act == MotionEvent.ACTION_UP) {
-                if (!demo) {
+                if (!needStart) {
                     phase = 1
                 } else if (startR.contains(e.x, e.y)) {
                     phase = 1
@@ -391,77 +757,192 @@ class LevelView(ctx: Context, private val spec: Spec) : View(ctx), InsetAware {
 
     // ---------- drawing ----------
 
+    private fun drawWind(c: Canvas, w: Float, hh: Float, k: Float) {
+        val top = hh * 0.30f
+        val bot = hh * 0.55f
+        val p = D.p
+        p.shader = null
+        p.style = Paint.Style.FILL
+        p.color = 0x16FFFFFF
+        c.drawRect(0f, top, w, bot, p)
+        p.style = Paint.Style.STROKE
+        p.strokeCap = Paint.Cap.ROUND
+        p.strokeWidth = 5f * k
+        p.color = 0x66FFFFFF
+        for (i in 0 until 6) {
+            val y = top + (i + 0.5f) * (bot - top) / 6f
+            var fx = (animT * 0.4f * windDir + i * 0.31f) % 1f
+            if (fx < 0f) fx += 1f
+            val x = fx * (w + 200f * k) - 100f * k
+            c.drawLine(x - windDir * 110f * k, y, x, y, p)
+        }
+        p.style = Paint.Style.FILL
+        val cy = (top + bot) / 2f
+        c.save()
+        if (windDir < 0) c.scale(-1f, 1f, w / 2f, cy)
+        D.bigArrow(c, w / 2f, cy, 110f * k, 0x44FFFFFF)
+        c.restore()
+    }
+
+    private fun drawDrop(c: Canvas, d: LDrop, dx: Float, ur: Float, k: Float, hh: Float, rim: Float) {
+        var a = 255
+        if (spec.fade != 0 && d.kind != K_STONE) {
+            val f = ((d.y - hh * 0.22f) / (hh * 0.42f)).coerceIn(0f, 1f)
+            a = (255f * (1f - 0.92f * f)).toInt()
+        }
+        if (spec.fade == 2 && d.kind == K_STONE) {
+            val f = (1f - abs(d.y - rim) / (hh * 0.2f)).coerceIn(0f, 1f)
+            a = (255f * f).toInt()
+        }
+        if (a < 8) return
+        if (a < 255) c.saveLayerAlpha(dx - ur * 2.2f, d.y - ur * 2.6f, dx + ur * 2.2f, d.y + ur * 2.4f, a)
+        val gy = d.y - ur * 0.3f
+        when (d.kind) {
+            K_STONE -> {
+                D2.stone(c, dx, d.y, ur * 0.85f)
+                if (spec.color == 3) D.ring(c, dx, d.y, ur * 0.95f, COL3[d.hue], 6f * k)
+                if (spec.goldStones) {
+                    D.circle(c, dx, d.y, ur * 0.8f, 0x66FFC21A)
+                    D.ring(c, dx, d.y, ur * 0.9f, 0xFFFFC21A.toInt(), 5f * k)
+                }
+            }
+            K_BONUS -> {
+                D.circle(c, dx, gy, ur * 1.15f, 0x33FFFFFF)
+                D.ring(c, dx, gy, ur * (1.2f + 0.08f * sin(animT * 6f)), 0xCCFFFFFF.toInt(), 5f * k)
+                D.umbrella(c, dx, d.y, ur, d.color)
+            }
+            K_MAGNET -> {
+                D.circle(c, dx, gy, ur * 1.15f, 0x33FF4DA6)
+                D.umbrella(c, dx, d.y, ur, d.color)
+                Fx.magnet(c, dx, d.y - ur * 1.35f, ur * 0.55f)
+            }
+            K_REPEL -> {
+                D.umbrella(c, dx, d.y, ur, d.color)
+                D2.cross(c, dx, d.y - ur * 0.42f, ur * 0.22f, LC.white, 5f * k)
+            }
+            K_BIG -> {
+                D.circle(c, dx, d.y - ur * 0.5f, ur * 1.7f, 0x22FFFFFF)
+                D.umbrella(c, dx, d.y, ur * 1.5f, d.color)
+            }
+            K_FREEZE -> {
+                D.circle(c, dx, gy, ur * 1.15f, 0x3380D8FF)
+                D.umbrella(c, dx, d.y, ur, d.color)
+                D2.clock(c, dx, d.y - ur * 0.5f, ur * 0.32f, LC.white)
+            }
+            K_GOLD -> {
+                D.circle(c, dx, gy, ur * 1.2f + 3f * k * sin(animT * 6f + d.phase), 0x33FFD43B)
+                D.umbrella(c, dx, d.y, ur, d.color)
+                D.star(c, dx + ur * 0.7f, d.y - ur * 1.0f, ur * 0.22f, 0xFFFFF3B0.toInt())
+            }
+            K_MULT -> {
+                D.umbrella(c, dx, d.y, ur, d.color)
+                D.text(c, "x2", dx, d.y - ur * 0.28f, ur * 0.75f, LC.white, Paint.Align.CENTER, LC.navy, 4f * k)
+            }
+            K_ELASTIC -> {
+                D.umbrella(c, dx, d.y, ur, d.color)
+                D.ring(c, dx, gy, ur * 1.1f, 0x88FFFFFF.toInt(), 4f * k)
+            }
+            else -> {
+                if (spec.special >= 0) {
+                    D.umbrella(c, dx, d.y, ur, fade(d.color))
+                } else {
+                    if (spec.victory) {
+                        D.circle(c, dx, gy, ur * 1.25f + 4f * k * sin(animT * 5f + d.phase), D.withA(d.color, 70))
+                    }
+                    D.umbrella(c, dx, d.y, ur, d.color)
+                }
+            }
+        }
+        if (a < 255) c.restore()
+    }
+
+    private fun drawBuckets(c: Canvas, bw: Float, rim: Float) {
+        val bh = bw * 0.86f
+        val ur = width * 0.095f
+        for (i in 0 until nb) {
+            val bxp = bxs[i]
+            c.save()
+            if (g == -1) c.scale(1f, -1f, 0f, rim)
+            c.scale(1f + wob * 0.08f, 1f - wob * 0.06f, bxp, rim + bh)
+            D.bucketBack(c, bxp, rim, bw)
+            for (ld in landed) {
+                if (ld.bi != i) continue
+                val pr = 1f - ld.life / 0.28f
+                val px = ld.x + (bxp - ld.x) * pr
+                val py = ld.y + (rim + bh * 0.35f - ld.y) * pr
+                val sc = 1f - 0.5f * pr
+                c.save()
+                c.translate(px, py)
+                c.scale(sc, sc)
+                D.umbrella(c, 0f, 0f, ur, ld.color)
+                c.restore()
+            }
+            D.bucketFront(c, bxp, rim, bw, bh)
+            if (spec.color != 0) {
+                D.fillRR(c, bxp - bw * 0.5f, rim - bw * 0.04f, bxp + bw * 0.5f, rim + bh, bw * 0.16f, D.withA(COL3[bcol], 150))
+            }
+            if (flash > 0f) {
+                D.fillRR(
+                    c, bxp - bw * 0.5f, rim - bw * 0.08f, bxp + bw * 0.5f, rim + bh, bw * 0.18f,
+                    D.withA(0xFFFF2020.toInt(), (flash * 120f).toInt())
+                )
+            }
+            c.restore()
+        }
+    }
+
     override fun onDraw(c: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
         val hh = h - insetBottom
-        val k = min(w / 941f, hh / 1672f)
+        val k = kOf(w, hh)
         val top = insetTop.toFloat()
         val p = D.p
+        val ur = w * 0.095f
+        val bw = bwNow(w)
+        val bh = bw * 0.86f
+        centers(w)
+        val rim = rimNow(hh, bw, k)
 
-        D.gameSky(c, w, h, hh, k, animT)
+        Fx.sky(c, w, h, hh, k, animT, theme)
+        if (spec.victory) fireworks.draw(c, k)
         p.shader = null
         p.style = Paint.Style.STROKE
         p.strokeCap = Paint.Cap.ROUND
         p.strokeWidth = 3f * k
-        p.color = 0x66FFFFFF
+        p.color = if (theme >= 5) 0x22FFFFFF else 0x66FFFFFF
         for (s in rain) {
             val sx = s.x * w
             val sy = s.y * hh
             c.drawLine(sx, sy, sx - s.len * hh * 0.15f, sy + s.len * hh, p)
         }
         p.style = Paint.Style.FILL
+        if (windMode() != 0) drawWind(c, w, hh, k)
+        if (spec.portals != 0 && pxL > 0f) {
+            val py = top + 330f * k
+            Fx.portal(c, pxL, py, w * 0.075f, w * 0.11f, 0xFF3B8CFF.toInt(), animT, portalPop)
+            Fx.portal(c, pxR, py, w * 0.075f, w * 0.11f, 0xFFFF8A3B.toInt(), animT, portalPop)
+        }
         D.gameGround(c, w, h, hh, k)
+        Fx.nightTint(c, w, h, hh, theme)
 
-        val ur = w * 0.095f
         for (d in drops) {
-            val dx = (d.x + sin(playT * 2f + d.phase) * 0.012f) * w
-            if (d.stone) {
-                D2.stone(c, dx, d.y, ur * 0.85f)
-            } else if (d.special) {
-                val gy = d.y - ur * 0.3f
-                D.circle(c, dx, gy, ur * 1.15f, 0x33FFFFFF)
-                D.ring(c, dx, gy, ur * (1.2f + 0.08f * sin(animT * 6f)), 0xCCFFFFFF.toInt(), 5f * k)
-                D.umbrella(c, dx, d.y, ur, d.color)
-            } else if (spec.special >= 0) {
-                D.umbrella(c, dx, d.y, ur, fade(d.color))
-            } else {
-                D.umbrella(c, dx, d.y, ur, d.color)
-            }
+            val dx = d.x + sin(playT * 2f + d.phase) * 0.012f * w
+            drawDrop(c, d, dx, ur, k, hh, rim)
         }
+        drawBuckets(c, bw, rim)
 
-        // bucket
-        val bw = w * 0.24f
-        val bh = bw * 0.86f
-        val rimY = rimYOf(hh, bw)
-        val bxp = bx * w
-        c.save()
-        c.scale(1f + wob * 0.08f, 1f - wob * 0.06f, bxp, rimY + bh)
-        D.bucketBack(c, bxp, rimY, bw)
-        for (ld in landed) {
-            val pr = 1f - ld.life / 0.28f
-            val px = ld.x + (bxp - ld.x) * pr
-            val py = ld.y + (rimY + bh * 0.35f - ld.y) * pr
-            val sc = 1f - 0.5f * pr
-            c.save()
-            c.translate(px, py)
-            c.scale(sc, sc)
-            D.umbrella(c, 0f, 0f, ur, ld.color)
-            c.restore()
+        if (spec.fog != 0 && lightning <= 0f) {
+            var fx = 0f
+            for (i in 0 until nb) fx += bxs[i]
+            fx /= nb
+            val fr = (if (spec.fog == 2) 0.22f else 0.34f) * hh * (if (nb > 1) 1.35f else 1f)
+            Fx.fog(c, w, h, fx, rim + bh * 0.1f, fr, 0xEE070B1F.toInt())
         }
-        D.bucketFront(c, bxp, rimY, bw, bh)
-        if (flash > 0f) {
-            D.fillRR(
-                c, bxp - bw * 0.5f, rimY - bw * 0.08f, bxp + bw * 0.5f, rimY + bh, bw * 0.18f,
-                D.withA(0xFFFF2020.toInt(), (flash * 120f).toInt())
-            )
-        }
-        c.restore()
-
         for (pp in pops) {
             val a = (pp.life.coerceIn(0f, 1f) * 255f).toInt()
-            D.text(c, pp.text, pp.x, pp.y, 46f * k, D.withA(pp.color, a), Paint.Align.CENTER, D.withA(navy, a), 6f * k)
+            D.text(c, pp.text, pp.x, pp.y, 46f * k, D.withA(pp.color, a), Paint.Align.CENTER, D.withA(LC.navy, a), 6f * k)
         }
 
         // the big round buttons
@@ -472,366 +953,33 @@ class LevelView(ctx: Context, private val spec: Spec) : View(ctx), InsetAware {
         D.arrowBtn(c, lcx, lcy, btnR, true, dirL, k)
         D.arrowBtn(c, rcx, lcy, btnR, false, dirR, k)
 
+        if (freezeT > 0f) {
+            p.shader = null
+            p.style = Paint.Style.FILL
+            p.color = 0x2260C8FF
+            c.drawRect(0f, 0f, w, h, p)
+        }
+        if (lightning > 0.85f) {
+            val la = ((lightning - 0.85f) / 0.35f * 170f).toInt().coerceIn(0, 200)
+            p.shader = null
+            p.style = Paint.Style.FILL
+            p.color = D.withA(LC.white, la)
+            c.drawRect(0f, 0f, w, h, p)
+            Fx.bolt(c, w * 0.4f, hh, k, la)
+        }
+
+        drawBanner(c, w, hh, k)
         drawHud(c, w, top, k)
         if (phase == 0) {
-            if (demo) drawDemo(c, w, h, hh, k) else drawIntro(c, w, hh, k)
+            if (!needStart) {
+                drawIntro(c, w, hh, k)
+            } else if (spec.special >= 0) {
+                drawDemo(c, w, h, hh, k)
+            } else {
+                drawTip(c, w, h, hh, k)
+            }
         }
         if (phase == 2) drawResult(c, w, h, hh, k)
         if (paused) drawPause(c, w, h, hh, k)
-    }
-
-    private fun fmtTime(t: Float): String {
-        val s = ceil(t).toInt().coerceAtLeast(0)
-        return String.format(Locale.US, "%d:%02d", s / 60, s % 60)
-    }
-
-    private fun pill(c: Canvas, l: Float, r: Float, hy: Float, k: Float, icon: Int, iconCol: Int, label: String, value: String) {
-        D.hudPill(c, l, hy - 42f * k, r, hy + 42f * k, k)
-        D.icon(c, icon, l + 46f * k, hy, 56f * k, iconCol)
-        D.text(c, label, l + 86f * k, hy - 6f * k, 26f * k, white, Paint.Align.LEFT)
-        D.text(c, value, l + 86f * k, hy + 32f * k, 42f * k, yellow, Paint.Align.LEFT, navy, 5f * k)
-    }
-
-    private fun drawHud(c: Canvas, w: Float, top: Float, k: Float) {
-        val hy = top + 58f * k
-        pill(c, w * 0.02f, w * 0.295f, hy, k, K.TROPHY, gold, "Score", score.toString())
-        pill(c, w * 0.335f, w * 0.60f, hy, k, K.TARGET, 0xFFFF5A5A.toInt(), "Target", spec.target.toString())
-        pill(c, w * 0.64f, w * 0.865f, hy, k, K.CROWN, gold, "Best", best.toString())
-
-        val pcx = w * 0.935f
-        val pr = 46f * k
-        D.hudCircle(c, pcx, hy, pr, k)
-        D.icon(c, K.PAUSE, pcx, hy, 40f * k, white)
-        pauseR.set(pcx - pr - 14f * k, hy - pr - 14f * k, pcx + pr + 14f * k, hy + pr + 14f * k)
-
-        if (!spec.timed) return
-        val y2 = hy + 92f * k
-        val hf = 38f * k
-
-        // time
-        val tl = w * 0.02f
-        val tr = w * 0.30f
-        D.hudPill(c, tl, y2 - hf, tr, y2 + hf, k)
-        D2.clock(c, tl + 46f * k, y2, 24f * k, gold)
-        val low = timeLeft <= 10f
-        val tc = if (low && ((animT * 4f).toInt() % 2 == 0)) 0xFFFF6B6B.toInt() else yellow
-        D.text(c, fmtTime(timeLeft), tl + 86f * k, y2 + 15f * k, 42f * k, tc, Paint.Align.LEFT, navy, 5f * k)
-
-        if (spec.special >= 0) {
-            val l2 = w * 0.335f
-            val r2 = w * 0.60f
-            D.hudPill(c, l2, y2 - hf, r2, y2 + hf, k)
-            D.umbrella(c, l2 + 50f * k, y2 + 4f * k, 26f * k, D.UMB[spec.special])
-            D.text(c, "+3s", l2 + 96f * k, y2 + 15f * k, 40f * k, green, Paint.Align.LEFT, navy, 5f * k)
-        }
-        if (spec.stones) {
-            val l2 = w * 0.335f
-            val r2 = w * 0.985f
-            D.hudPill(c, l2, y2 - hf, r2, y2 + hf, k)
-            for (i in 0 until Levels.HEARTS) {
-                val hx = l2 + (r2 - l2) * (0.09f + i * 0.165f)
-                val full = i < hearts
-                D2.heart(
-                    c, hx, y2 + 2f * k, 21f * k,
-                    if (full) 0xFFFF4D5E.toInt() else 0xFF3A4F7A.toInt(),
-                    if (full) 0xFFB8162B.toInt() else 0xFF22345A.toInt()
-                )
-            }
-        }
-    }
-
-    private fun drawReach(c: Canvas, cx: Float, y: Float, k: Float, a: Int, num: String) {
-        val sz = 44f * k
-        val big = 60f * k
-        val suffix = " Points"
-        val p = D.p
-        p.shader = null
-        p.typeface = D.BLACK
-        p.textSize = sz
-        val w1 = p.measureText("Reach ")
-        val w3 = p.measureText(suffix)
-        p.textSize = big
-        val w2 = p.measureText(num)
-        val total = w1 + w2 + w3
-        val maxW = 560f * k
-        val s = if (total > maxW) maxW / total else 1f
-        var x = cx - total * s / 2f
-        D.text(c, "Reach ", x, y, sz * s, D.withA(white, a), Paint.Align.LEFT)
-        x += w1 * s
-        D.text(c, num, x, y, big * s, D.withA(yellow, a), Paint.Align.LEFT, D.withA(navy, a), 6f * k * s)
-        x += w2 * s
-        D.text(c, suffix, x, y, sz * s, D.withA(white, a), Paint.Align.LEFT)
-    }
-
-    // "Catch Umbrellas!" and what to do in this level
-    private fun drawIntro(c: Canvas, w: Float, hh: Float, k: Float) {
-        val a = (min(1f, introT / 0.5f) * 255f).toInt().coerceIn(0, 255)
-        val cx = w / 2f
-        val cy = hh * 0.42f
-        val label = if (Levels.hasStages(spec.level)) {
-            "Level ${spec.level} \u2022 Stage ${Levels.letter(spec.stage)}"
-        } else {
-            "Level ${spec.level}"
-        }
-        D.text(c, label, cx, cy - 165f * k, 40f * k, D.withA(white, a), Paint.Align.CENTER, D.withA(navy, a), 7f * k)
-        D.text(c, "Catch", cx, cy - 40f * k, 100f * k, D.withA(white, a), Paint.Align.CENTER, D.withA(0xFF1F5FBF.toInt(), a), 14f * k)
-        val s2 = min(120f * k, D.fit("Umbrellas!", 560f * k))
-        D.text(c, "Umbrellas!", cx, cy + 70f * k, s2, D.withA(0xFFFFD42A.toInt(), a), Paint.Align.CENTER, D.withA(0xFF2A2A6A.toInt(), a), 14f * k)
-
-        val ph = if (spec.stones) 200f else 150f
-        D.fillRR(c, cx - 330f * k, cy + 105f * k, cx + 330f * k, cy + (105f + ph) * k, 46f * k, D.withA(0xFF7A1E6E.toInt(), (a * 0.92f).toInt()))
-        drawReach(c, cx, cy + 168f * k, k, a, spec.target.toString())
-        val line2 = if (spec.timed) "in ${spec.time.toInt()} seconds!" else "to Complete the Game!"
-        D.text(c, line2, cx, cy + 217f * k, min(34f * k, D.fit(line2, 560f * k)), D.withA(white, a))
-        if (spec.stones) {
-            val l3 = "Stone: -1 heart and -5 sec!"
-            D.text(c, l3, cx, cy + 262f * k, min(30f * k, D.fit(l3, 560f * k)), D.withA(yellow, a))
-        }
-    }
-
-    private fun parts(c: Canvas, cx: Float, y: Float, size: Float, maxW: Float, txt: Array<String>, col: IntArray, k: Float) {
-        val p = D.p
-        p.shader = null
-        p.typeface = D.BLACK
-        p.textSize = size
-        var total = 0f
-        for (t in txt) total += p.measureText(t)
-        val s = if (total > maxW) maxW / total else 1f
-        var x = cx - total * s / 2f
-        for (i in txt.indices) {
-            p.textSize = size
-            val wd = p.measureText(txt[i]) * s
-            D.text(c, txt[i], x, y, size * s, col[i], Paint.Align.LEFT, navy, 6f * k * s)
-            x += wd
-        }
-    }
-
-    private fun panelBase(c: Canvas, w: Float, h: Float, pl: Float, pt: Float, pr: Float, pb: Float, k: Float) {
-        D.p.shader = null
-        D.p.style = Paint.Style.FILL
-        D.p.color = 0xAA0A1B3D.toInt()
-        c.drawRect(0f, 0f, w, h, D.p)
-        D.fillRR(c, pl - 6f * k, pt - 6f * k, pr + 6f * k, pb + 6f * k, 46f * k, white)
-        D.gradRR(c, pl, pt, pr, pb, 42f * k, 0xFF3F9BFF.toInt(), 0xFF1450C8.toInt())
-    }
-
-    // Stage B: a small demo that shows what to do, then a Start button
-    private fun drawDemo(c: Canvas, w: Float, h: Float, hh: Float, k: Float) {
-        val pl = w * 0.07f
-        val pr = w * 0.93f
-        val pt = hh * 0.1f
-        val pb = pt + 880f * k
-        panelBase(c, w, h, pl, pt, pr, pb, k)
-        val cx = w / 2f
-        val inner = (pr - pl) - 70f * k
-        D.text(c, "Stage B", cx, pt + 105f * k, 78f * k, white, Paint.Align.CENTER, navy, 10f * k)
-        D.text(c, "Level ${spec.level}", cx, pt + 158f * k, 32f * k, 0xFFBFE2FF.toInt())
-        val colName = Levels.COLOR_NAMES[spec.special]
-        parts(
-            c, cx, pt + 238f * k, 44f * k, inner,
-            arrayOf("Catch the ", colName, " umbrella!"),
-            intArrayOf(white, D.UMB[spec.special], white), k
-        )
-        val l2 = "+3 seconds every time!"
-        D.text(c, l2, cx, pt + 292f * k, min(42f * k, D.fit(l2, inner)), green, Paint.Align.CENTER, navy, 6f * k)
-        val l3 = "Pale umbrellas give only points."
-        D.text(c, l3, cx, pt + 338f * k, min(30f * k, D.fit(l3, inner)), 0xFFD6E8FF.toInt())
-
-        // demo box
-        val dl = pl + 40f * k
-        val dr = pr - 40f * k
-        val dt0 = pt + 372f * k
-        val db = pt + 700f * k
-        val dw = dr - dl
-        clip.reset()
-        D.rf.set(dl, dt0, dr, db)
-        clip.addRoundRect(D.rf, 30f * k, 30f * k, Path.Direction.CW)
-        c.save()
-        c.clipPath(clip)
-        D.p.style = Paint.Style.FILL
-        D.p.shader = LinearGradient(0f, dt0, 0f, db, 0xFF57B6F2.toInt(), 0xFFBDEBFF.toInt(), Shader.TileMode.CLAMP)
-        c.drawRect(dl, dt0, dr, db, D.p)
-        D.p.shader = null
-        D.cloud(c, dl + dw * 0.2f, dt0 + 60f * k, 40f * k)
-        D.cloud(c, dl + dw * 0.82f, dt0 + 110f * k, 32f * k)
-        D.fillRR(c, dl, db - 56f * k, dr, db + 20f * k, 0f, 0xFF63C94B.toInt())
-
-        val cxD = (dl + dr) / 2f
-        val bwD = 150f * k
-        val bhD = bwD * 0.86f
-        val rimD = db - 40f * k - bhD
-        val period = 3.6f
-        val tt = (animT % period) / period
-
-        for (j in 0..1) {
-            val ft = (tt + 0.2f + j * 0.5f) % 1f
-            val ux = dl + dw * (0.17f + 0.66f * j)
-            val uy = dt0 - 30f * k + (db - dt0 + 80f * k) * ft
-            D.umbrella(c, ux, uy, 34f * k, fade(D.UMB[(spec.special + 2 + j * 2) % 6]))
-        }
-
-        val wb = if (tt >= 0.5f && tt <= 0.68f) 1f - (tt - 0.5f) / 0.18f else 0f
-        c.save()
-        c.scale(1f + wb * 0.08f, 1f - wb * 0.06f, cxD, rimD + bhD)
-        D.bucketBack(c, cxD, rimD, bwD)
-        if (tt < 0.5f) {
-            val y0 = dt0 - 40f * k
-            val sy = y0 + ((rimD + 25f * k) - y0) * (tt / 0.5f)
-            D.circle(c, cxD, sy - 22f * k, 50f * k, 0x33FFFFFF)
-            D.ring(c, cxD, sy - 22f * k, (52f + 4f * sin(animT * 6f)) * k, 0xCCFFFFFF.toInt(), 4f * k)
-            D.umbrella(c, cxD, sy, 40f * k, D.UMB[spec.special])
-        }
-        D.bucketFront(c, cxD, rimD, bwD, bhD)
-        c.restore()
-
-        if (tt >= 0.5f) {
-            val q = ((tt - 0.5f) / 0.45f).coerceIn(0f, 1f)
-            val a = ((1f - q) * 255f).toInt().coerceIn(0, 255)
-            val yy = rimD - 20f * k - q * 120f * k
-            D2.clock(c, cxD - 85f * k, yy - 16f * k, 26f * k, D.withA(gold, a))
-            D.text(c, "+3s", cxD + 20f * k, yy, 58f * k, D.withA(green, a), Paint.Align.CENTER, D.withA(navy, a), 7f * k)
-        }
-        c.restore()
-        D.strokeRR(c, dl, dt0, dr, db, 30f * k, 0xAAFFFFFF.toInt(), 4f * k)
-
-        // start button
-        val bl = pl + 60f * k
-        val br = pr - 60f * k
-        val by = pt + 790f * k
-        D.gloss(c, bl, by - 48f * k, br, by + 48f * k, 0xFF55E36F.toInt(), 0xFF1D9F39.toInt(), 0xFFFFD84D.toInt(), 0x66105A22, k)
-        D.icon(c, K.PLAY, bl + 66f * k, by, 50f * k, white)
-        D.text(c, "Start", cx + 28f * k, by + 17f * k, 50f * k, white, Paint.Align.CENTER, 0xFF0F6B22.toInt(), 7f * k)
-        startR.set(bl, by - 54f * k, br, by + 54f * k)
-    }
-
-    private fun resBtn(c: Canvas, idx: Int, cy: Float, bl: Float, br: Float, k: Float, label: String, style: Int, icon: Int, act: Int) {
-        val c1: Int
-        val c2: Int
-        val bd: Int
-        val sh: Int
-        val st: Int
-        when (style) {
-            0 -> {
-                c1 = 0xFF55E36F.toInt(); c2 = 0xFF1D9F39.toInt(); bd = 0xFFFFD84D.toInt(); sh = 0x66105A22; st = 0xFF0F6B22.toInt()
-            }
-            1 -> {
-                c1 = 0xFFFFB02E.toInt(); c2 = 0xFFFF7A00.toInt(); bd = 0xFFFFE0A0.toInt(); sh = 0x66803000; st = 0xFF9A4A00.toInt()
-            }
-            else -> {
-                c1 = 0xFFB56DFF.toInt(); c2 = 0xFF6C2BD8.toInt(); bd = 0xFFD9B8FF.toInt(); sh = 0x66331166; st = 0xFF3A1280.toInt()
-            }
-        }
-        D.gloss(c, bl, cy - 48f * k, br, cy + 48f * k, c1, c2, bd, sh, k)
-        D.icon(c, icon, bl + 66f * k, cy, 50f * k, white)
-        D.text(
-            c, label, (bl + br) / 2f + 28f * k, cy + 17f * k,
-            min(48f * k, D.fit(label, (br - bl) - 220f * k)), white, Paint.Align.CENTER, st, 7f * k
-        )
-        resR[idx].set(bl, cy - 54f * k, br, cy + 54f * k)
-        resAct[idx] = act
-    }
-
-    // a simple result panel (the exact "Level Complete" screen comes in Stage 3)
-    private fun drawResult(c: Canvas, w: Float, h: Float, hh: Float, k: Float) {
-        val staged = Levels.hasStages(spec.level)
-        val lastStage = !staged || spec.stage == 2
-        val nxt = Levels.next(spec.level, spec.stage)
-
-        val labels = ArrayList<String>()
-        val styles = ArrayList<Int>()
-        val icons = ArrayList<Int>()
-        val acts = ArrayList<Int>()
-        if (won) {
-            if (nxt != null) {
-                labels.add(if (nxt[0] == spec.level) "Next Stage" else "Next Level")
-                styles.add(0)
-                icons.add(K.FWD)
-                acts.add(0)
-            }
-            labels.add("Play Again")
-            styles.add(1)
-            icons.add(K.PLAY)
-            acts.add(1)
-            labels.add("Levels")
-            styles.add(2)
-            icons.add(K.GRID)
-            acts.add(2)
-        } else {
-            labels.add("Try Again")
-            styles.add(0)
-            icons.add(K.PLAY)
-            acts.add(1)
-            labels.add("Levels")
-            styles.add(2)
-            icons.add(K.GRID)
-            acts.add(2)
-        }
-        val n = labels.size
-        resCount = n
-
-        val pl = w * 0.1f
-        val pr = w * 0.9f
-        val pt = hh * 0.25f
-        val pb = pt + (450f + n * 135f) * k
-        panelBase(c, w, h, pl, pt, pr, pb, k)
-        val cx = w / 2f
-        if (won) D.mascot(c, cx, pt - 40f * k, 230f * k)
-
-        val title = if (!won) "Try Again!" else if (lastStage) "Level Complete!" else "Stage ${Levels.letter(spec.stage)} Complete!"
-        D.text(
-            c, title, cx, pt + 170f * k, min(66f * k, D.fit(title, (pr - pl) - 80f * k)),
-            0xFFFFD42A.toInt(), Paint.Align.CENTER, 0xFF8A3E08.toInt(), 10f * k
-        )
-
-        // score and target
-        val bl = pl + 45f * k
-        val br = pr - 45f * k
-        val bt = pt + 215f * k
-        val bb = pt + 335f * k
-        D.fillRR(c, bl - 5f * k, bt - 5f * k, br + 5f * k, bb + 5f * k, 34f * k, 0xFFFFC84A.toInt())
-        D.gradRR(c, bl, bt, br, bb, 30f * k, 0xFF1B4C9E.toInt(), 0xFF0B2A66.toInt())
-        D.fillRR(c, cx - 2f * k, bt + 18f * k, cx + 2f * k, bb - 18f * k, 2f * k, 0xAAFFC84A.toInt())
-        val lc = (bl + cx) / 2f
-        val rc = (cx + br) / 2f
-        D.text(c, "Your Score", lc, bt + 42f * k, 28f * k, white)
-        D.icon(c, K.STAR, lc - 62f * k, bt + 86f * k, 46f * k, gold)
-        D.text(c, score.toString(), lc + 24f * k, bt + 100f * k, 52f * k, yellow, Paint.Align.CENTER, navy, 6f * k)
-        D.text(c, "Target", rc, bt + 42f * k, 28f * k, white)
-        D.icon(c, K.TARGET, rc - 62f * k, bt + 86f * k, 46f * k, 0xFFFF5A5A.toInt())
-        D.text(c, spec.target.toString(), rc + 24f * k, bt + 100f * k, 52f * k, yellow, Paint.Align.CENTER, navy, 6f * k)
-
-        if (won) {
-            D.text(c, "Amazing!", cx, pt + 398f * k, 50f * k, 0xFF8BFF6B.toInt(), Paint.Align.CENTER, 0xFF1D6B22.toInt(), 8f * k)
-        } else {
-            D.text(c, reason, cx, pt + 398f * k, min(44f * k, D.fit(reason, (pr - pl) - 80f * k)), 0xFFFFE066.toInt(), Paint.Align.CENTER, navy, 6f * k)
-        }
-
-        for (i in 0 until n) {
-            val cy = pt + 450f * k + 55f * k + i * 135f * k
-            resBtn(c, i, cy, pl + 60f * k, pr - 60f * k, k, labels[i], styles[i], icons[i], acts[i])
-        }
-    }
-
-    private fun drawPause(c: Canvas, w: Float, h: Float, hh: Float, k: Float) {
-        val pl = w * 0.14f
-        val pr = w * 0.86f
-        val pt = hh * 0.3f
-        val pb = pt + 520f * k
-        panelBase(c, w, h, pl, pt, pr, pb, k)
-        D.text(c, "Paused", w / 2f, pt + 125f * k, 84f * k, white, Paint.Align.CENTER, 0xFF0D2F7A.toInt(), 10f * k)
-
-        val bl = pl + 60f * k
-        val br = pr - 60f * k
-        val ry = pt + 230f * k
-        D.gloss(c, bl, ry - 55f * k, br, ry + 55f * k, 0xFF55E36F.toInt(), 0xFF1D9F39.toInt(), 0xFFFFD84D.toInt(), 0x66105A22, k)
-        D.icon(c, K.PLAY, bl + 70f * k, ry, 56f * k, white)
-        D.text(c, "Resume", w / 2f + 30f * k, ry + 18f * k, 52f * k, white, Paint.Align.CENTER, 0xFF0F6B22.toInt(), 7f * k)
-        resumeR.set(bl, ry - 55f * k, br, ry + 55f * k)
-
-        val hy = pt + 400f * k
-        D.gloss(c, bl, hy - 55f * k, br, hy + 55f * k, 0xFFB56DFF.toInt(), 0xFF6C2BD8.toInt(), 0xFFD9B8FF.toInt(), 0x66331166, k)
-        D.icon(c, K.GRID, bl + 70f * k, hy, 52f * k, white)
-        D.text(c, "Levels", w / 2f + 30f * k, hy + 18f * k, 52f * k, white, Paint.Align.CENTER, 0xFF3A1280.toInt(), 7f * k)
-        homeR.set(bl, hy - 55f * k, br, hy + 55f * k)
     }
 }
